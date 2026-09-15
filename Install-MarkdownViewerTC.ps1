@@ -1,25 +1,32 @@
 <#
 .SYNOPSIS
-  Installs the Serg2000Mr Markdown lister plugin (GitHub-style) into Total
-  Commander and registers it for .md/.markdown preview via F3 / Ctrl+Q.
+  Installs the MDView Markdown lister plugin into Total Commander and
+  registers it for .md/.markdown preview via F3 / Ctrl+Q.
 
 .DESCRIPTION
   Reusable installer. Safe to re-run (idempotent): it removes only its own
-  previous registration lines and re-adds them at the next free plugin index.
+  previous registration lines (plus the superseded MarkdownViewGitHubStyle
+  lines, see notes) and re-adds its entry at the next free plugin index.
+
+  Why MDView: the previous plugin (Serg2000Mr wlx-markdown-viewer-github-style
+  v1.3.1) renders nicely but swallows the Esc key — WebView2 runs in a separate
+  Chromium process that the plugin's WH_KEYBOARD hook never sees, so Esc never
+  reaches Total Commander and the Lister window won't close. Upstream PR #7 has
+  a fix but it was never merged. MDView (rweijnen/MDView) forwards Esc from the
+  page to TC via WebMessage + WM_CLOSE, so Esc closes the viewer again.
 
   What it does:
     1. Checks Total Commander dir + WebView2 Runtime (warns only).
     2. Closes running TOTALCMD.EXE / TOTALCMD64.EXE (unless -LeaveRunning).
-    3. Downloads wlx-markdown-viewer-github-style v1.3.1 (x64 + x86 zips)
-       from GitHub releases and verifies SHA-256.
-    4. Copies plugin files to <TcPath>\plugins\wlx\MarkdownViewGitHubStyle\
-       (x64 set + x86 .wlx/.dll/dotnet-x86 runtime for 32-bit TC).
-    5. Patches MarkdownView.ini: fixes " MarkdownExtensions" leading-space
-       typo line, sets [Translate] Enabled=0 (GitHub CSS already default).
-    6. Backs up wincmd.ini, then registers the plugin in [ListerPlugins]
-       (32-bit TC) and [ListerPlugins64] (64-bit TC) with an EXT detect
-       filter limited to markdown extensions (never hijacks .txt).
-    7. Verifies files, ini lines, and that ListLoad is exported from the
+    3. Downloads MDView v0.2.4 zip from GitHub releases and verifies SHA-256.
+    4. Copies mdview.wlx / mdview.wlx64 (+ mdview.exe standalone viewer) to
+       <TcPath>\plugins\wlx\mdview\. Removes the superseded
+       MarkdownViewGitHubStyle registration so only one Markdown WLX is active.
+    5. Backs up wincmd.ini, then registers the plugin in [ListerPlugins]
+       (32-bit TC) and [ListerPlugins64] (64-bit TC) with the detect filter
+       taken verbatim from the plugin's ListGetDetectString
+       (EXT="MD" | EXT="MARKDOWN") — never hijacks .txt.
+    6. Verifies files, ini lines, and that ListLoad is exported from the
        DLL matching the PowerShell bitness. Restarts TC (unless -LeaveRunning).
 
 .PARAMETER TcPath
@@ -27,7 +34,7 @@
   and wincmd.ini). Default 'C:\Utils\TotalCmd'.
 
 .PARAMETER Version
-  Plugin release tag. Default 'v1.3.1'.
+  MDView release tag. Default 'v0.2.4'.
 
 .PARAMETER LeaveRunning
   Do not close/restart Total Commander. Close it yourself first, otherwise
@@ -44,22 +51,21 @@
 [CmdletBinding()]
 param(
   [string]$TcPath = 'C:\Utils\TotalCmd',
-  [string]$Version = 'v1.3.1',
+  [string]$Version = 'v0.2.4',
   [switch]$LeaveRunning
 )
 
 $ErrorActionPreference = 'Stop'
 
-$PluginDirName = 'MarkdownViewGitHubStyle'
-$BaseUrl   = "https://github.com/Serg2000Mr/wlx-markdown-viewer-github-style/releases/download/$Version"
-$Assets    = @{
-  x64 = @{ File = 'wlx-markdown-viewer-github-style-release-x64.zip'
-            Sha256 = 'D38BEFBAD0D70507CD131E3D1E4C624AABA89196BF53B6832379EBE83AFDAE88' }
-  x86 = @{ File = 'wlx-markdown-viewer-github-style-release-x86.zip'
-            Sha256 = '2B3105BEC6E972FB6C13640B97190C5E92E5AE58030F315F1C3A3DFD6C72D4B0' }
-}
-# Extensions claimed inside the plugin AND in the TC detect filter.
-$MdExts = @('MD','MARKDOWN','MDOWN','MDTEXT','MDTXT','MDWN','MK','MKD','MKDN','MKDOWN','MDC')
+$PluginDirName = 'mdview'
+$BaseUrl = "https://github.com/rweijnen/MDView/releases/download/$Version"
+$ZipFile = "MDView-$Version.zip"
+# SHA-256 of the release zip, verified at install time on 2026-09-15.
+$ZipSha256 = 'A1EDFFFB810FED3821C283BEF66027CF70DDDE65D0380EDFB6FC535D523F4170'
+# Detect filter MUST stay identical to ListGetDetectString in src/lib.rs.
+$Detect = 'EXT="MD" | EXT="MARKDOWN"'
+# Registration lines of the superseded plugin that this installer retires.
+$Superseded = @('MarkdownViewGitHubStyle')
 
 function Write-Step([string]$Msg) { Write-Host "`n==> $Msg" -ForegroundColor Cyan }
 function Assert-True([bool]$Cond, [string]$Msg) {
@@ -95,58 +101,32 @@ if (-not $LeaveRunning) {
 }
 
 # ---------- 3. download + hash check ----------
-Write-Step "Downloading plugin $Version"
+Write-Step "Downloading MDView $Version"
 $DlDir = Join-Path $env:TEMP 'mdview-tc'
 New-Item -ItemType Directory -Force -Path $DlDir | Out-Null
-$Zips = @{}
-foreach ($arch in 'x64','x86') {
-  $dest = Join-Path $DlDir $Assets[$arch].File
-  if (-not (Test-Path $dest)) {
-    Invoke-WebRequest -Uri "$BaseUrl/$($Assets[$arch].File)" -OutFile $dest
-  }
-  $hash = (Get-FileHash $dest -Algorithm SHA256).Hash
-  Assert-True ($hash -eq $Assets[$arch].Sha256) "$arch zip SHA-256 matches"
-  $Zips[$arch] = $dest
+$ZipPath = Join-Path $DlDir $ZipFile
+if (-not (Test-Path $ZipPath)) {
+  Invoke-WebRequest -Uri "$BaseUrl/$ZipFile" -OutFile $ZipPath
 }
+$hash = (Get-FileHash $ZipPath -Algorithm SHA256).Hash
+Assert-True ($hash -eq $ZipSha256) "zip SHA-256 matches ($ZipFile)"
 
-# ---------- 4+5. extract + copy files ----------
+# ---------- 4. extract + copy files ----------
 Write-Step 'Installing plugin files'
-$Stage64 = Join-Path $DlDir 'stage-x64'; $Stage86 = Join-Path $DlDir 'stage-x86'
-Remove-Item -Recurse -Force $Stage64,$Stage86 -ErrorAction SilentlyContinue
-Expand-Archive -Path $Zips.x64 -DestinationPath $Stage64 -Force
-Expand-Archive -Path $Zips.x86 -DestinationPath $Stage86 -Force
+$Stage = Join-Path $DlDir 'stage'
+Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
+Expand-Archive -Path $ZipPath -DestinationPath $Stage -Force
 
 $Dest = Join-Path $TcPath "plugins\wlx\$PluginDirName"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-# x64 set (root files + assets). NOTE: root WebView2Loader.dll here is the x64 one.
-Copy-Item "$Stage64\*" $Dest -Recurse -Force
-# x86 additions only: ship side-by-side, do NOT overwrite the x64 root files.
-Copy-Item "$Stage86\MarkdownView.wlx","$Stage86\Markdown-x86.dll" $Dest -Force
-Copy-Item "$Stage86\dotnet-x86" $Dest -Recurse -Force
-$Rt86 = Join-Path $Dest 'runtimes\win-x86'
-New-Item -ItemType Directory -Force -Path $Rt86 | Out-Null
-Copy-Item "$Stage86\runtimes\win-x86\*" $Rt86 -Recurse -Force
+Copy-Item "$Stage\mdview.wlx","$Stage\mdview.wlx64" $Dest -Force
+if (Test-Path "$Stage\mdview.exe") { Copy-Item "$Stage\mdview.exe" $Dest -Force }
 
-foreach ($f in 'MarkdownView.wlx64','MarkdownView.wlx','Markdown-x64.dll','MarkdigNative-x64.dll',
-              'Markdown-x86.dll','WebView2Loader.dll','MarkdownView.ini',
-              'css\github.css','css\github.dark.css','runtimes\win-x64\native\WebView2Loader.dll',
-              'runtimes\win-x86\native\WebView2Loader.dll') {
+foreach ($f in 'mdview.wlx64','mdview.wlx') {
   Assert-True (Test-Path (Join-Path $Dest $f)) "installed: $f"
 }
-Assert-True (Test-Path (Join-Path $Dest 'dotnet-x86\MarkdigNative-x86.dll')) 'installed: dotnet-x86 runtime (32-bit TC needs it, no .NET install required)'
 
-# ---------- 6. patch MarkdownView.ini ----------
-Write-Step 'Patching MarkdownView.ini'
-$Ini = Join-Path $Dest 'MarkdownView.ini'
-$t = [System.IO.File]::ReadAllText($Ini)
-$t = $t -replace '(?m)^ MarkdownExtensions=', 'MarkdownExtensions='   # leading-space typo in shipped ini
-$t = $t -replace '(?m)(^\[Translate\]\r?\nEnabled=)1', '${1}0'          # no auto Google Translate
-[System.IO.File]::WriteAllText($Ini, $t)
-$check = Get-Content $Ini
-Assert-True ($check -contains 'MarkdownExtensions=md;markdown;mdown;mdtext;mdtxt;mdwn;mk;mkd;mkdn;mkdown;mdc') 'MarkdownExtensions key readable (no leading space)'
-Assert-True ((($check -join "`n") -match '(?s)\[Translate\]\s*\r?\nEnabled=0')) '[Translate] Enabled=0'
-
-# ---------- 7. register in wincmd.ini ----------
+# ---------- 5. register in wincmd.ini ----------
 Write-Step 'Registering lister plugin in wincmd.ini'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 Copy-Item $WincmdIni "$WincmdIni.backup-$stamp" -Force
@@ -158,17 +138,20 @@ $lines = [System.IO.File]::ReadAllLines($WincmdIni, $enc)
 
 function Register-Section {
   param([string[]]$Lines, [string]$Section, [string]$DllFile)
-  $detect = ($MdExts | ForEach-Object { 'EXT="' + $_ + '"' }) -join ' | '
-  # pass 1: drop our own stale lines (our dll path + its N_detect) and
-  # TC-written junk ('N=1') inside the section. Matched by literal dll path,
-  # never by extension text, so a foreign plugin's N_detect is never touched.
+  # pass 1: drop our own stale lines (our dll path + its N_detect), the
+  # superseded plugin's lines, and TC-written junk ('N=1') inside the section.
+  # The detect line is dropped only when it directly follows one of those dll
+  # lines, so a foreign plugin's N_detect is never touched.
   $out = New-Object System.Collections.Generic.List[string]
   $inSec = $false
   $skipNextDetect = $false
   foreach ($l in $Lines) {
     if ($l -match '^\[.*\]$') { $inSec = ($l -eq $Section); $skipNextDetect = $false }
     if ($inSec) {
-      if ($l -match 'MarkdownViewGitHubStyle') { $skipNextDetect = $true; continue }
+      $own = $l -match [regex]::Escape($DllFile)
+      $old = $false
+      foreach ($s in $Superseded) { if ($l -match $s) { $old = $true; break } }
+      if ($own -or $old) { $skipNextDetect = $true; continue }
       if ($skipNextDetect -and $l -match '^\d+_detect=') { $skipNextDetect = $false; continue }
       $skipNextDetect = $false
       if ($l -match '^\d+=1$') { continue }
@@ -177,8 +160,8 @@ function Register-Section {
   }
   $Lines = $out.ToArray()
   # pass 2: find section (create it if missing), pick next free index.
-  # -match on section names: [ListerPlugins] otherwise also matches the
-  # [ListerPlugins64] prefix, so compare with -eq / IndexOf (exact).
+  # Compare section names with -eq / IndexOf (exact): -match on
+  # '[ListerPlugins]' would also match the '[ListerPlugins64]' prefix.
   $si = [Array]::IndexOf($Lines, $Section)
   if ($si -lt 0) {
     $anchor = [Array]::IndexOf($Lines, '[ListerPlugins64]')
@@ -193,23 +176,24 @@ function Register-Section {
   $used = @()
   for ($i = $si + 1; $i -lt $end; $i++) { if ($Lines[$i] -match '^(\d+)=') { $used += [int]$Matches[1] } }
   $idx = 0; while ($used -contains $idx) { $idx++ }
-  $entry = @("$idx=$DllFile", "$idx`_detect=`"$detect`"")
+  $entry = @("$idx=$DllFile", "$idx`_detect=`"$Detect`"")
   $head = $Lines[0..$si]
   $body = @(); if ($end - $si - 1 -gt 0) { $body = $Lines[($si+1)..($end-1)] }
   $tail = @(); if ($end -lt $Lines.Count) { $tail = $Lines[$end..($Lines.Count-1)] }
   return @($head + $body + $entry + $tail)
 }
 
-$lines = Register-Section $lines '[ListerPlugins]'   "$Dest\MarkdownView.wlx"
-$lines = Register-Section $lines '[ListerPlugins64]' "$Dest\MarkdownView.wlx64"
+$lines = Register-Section $lines '[ListerPlugins]'   "$Dest\mdview.wlx"
+$lines = Register-Section $lines '[ListerPlugins64]' "$Dest\mdview.wlx64"
 [System.IO.File]::WriteAllLines($WincmdIni, $lines, $enc)
 
 $final = [System.IO.File]::ReadAllText($WincmdIni, $enc)
-Assert-True ($final -match '\[ListerPlugins\][^\[]*MarkdownView\.wlx\r?\n\d+_detect=') '[ListerPlugins] has .wlx + detect'
-Assert-True ($final -match '\[ListerPlugins64\][^\[]*MarkdownView\.wlx64\r?\n\d+_detect=') '[ListerPlugins64] has .wlx64 + detect'
+Assert-True ($final -match '\[ListerPlugins\][^\[]*mdview\.wlx\r?\n\d+_detect=') '[ListerPlugins] has mdview.wlx + detect'
+Assert-True ($final -match '\[ListerPlugins64\][^\[]*mdview\.wlx64\r?\n\d+_detect=') '[ListerPlugins64] has mdview.wlx64 + detect'
+Assert-True ($final -notmatch 'MarkdownViewGitHubStyle') 'superseded plugin registration removed'
 Assert-True ($final -notmatch 'EXT="TXT"') 'detect filter does not claim .txt'
 
-# ---------- 8. DLL export sanity (bitness of THIS powershell) ----------
+# ---------- 6. DLL export sanity (bitness of THIS powershell) ----------
 Write-Step 'Verifying plugin DLL exports'
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -220,14 +204,15 @@ public static class WlxCheck {
 }
 '@
 $bit64 = ([IntPtr]::Size -eq 8)
-$dll = if ($bit64) { Join-Path $Dest 'MarkdownView.wlx64' } else { Join-Path $Dest 'MarkdownView.wlx' }
+$dll = if ($bit64) { Join-Path $Dest 'mdview.wlx64' } else { Join-Path $Dest 'mdview.wlx' }
 Write-Host "  powershell is $(if ($bit64) {'64-bit'} else {'32-bit'}), testing $dll (run the script in the other powershell to test the other DLL)"
 $h = [WlxCheck]::LoadLibrary($dll)
 Assert-True ($h -ne [IntPtr]::Zero) "LoadLibrary succeeds: $(Split-Path $dll -Leaf)"
 Assert-True ([WlxCheck]::GetProcAddress($h, 'ListLoad') -ne [IntPtr]::Zero) 'ListLoad exported'
+Assert-True ([WlxCheck]::GetProcAddress($h, 'ListGetDetectString') -ne [IntPtr]::Zero) 'ListGetDetectString exported'
 [WlxCheck]::FreeLibrary($h) | Out-Null
 
-# ---------- 9. restart ----------
+# ---------- 7. restart ----------
 if (-not $LeaveRunning) {
   Write-Step 'Starting Total Commander'
   Start-Process (if (Test-Path $TcExe64) { $TcExe64 } else { $TcExe32 })
