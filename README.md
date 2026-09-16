@@ -3,15 +3,27 @@
 > Reusable installer + docs for Markdown preview in Total Commander.
 > Run `Install-MarkdownViewerTC.ps1` from this repo — details below.
 
-GitHub-style Markdown preview inside Total Commander via the
-[`rweijnen/MDView`](https://github.com/rweijnen/MDView) lister plugin
-(WebView2/Chromium, single small DLL, no .NET install needed).
+Markdown preview inside Total Commander with a **renderer choice**:
+`Esc` that closes the viewer, or richer GitHub-style rendering.
 
 - **Script:** `Install-MarkdownViewerTC.ps1` (same folder as this doc)
 - **Target layout:** Total Commander installed at `C:\Utils\TotalCmd`
   (override with `-TcPath` for other locations)
 - **Result:** `F3` on any `.md` / `.markdown` file renders a formatted page;
-  `Ctrl+Q` shows the same live in the opposite panel; **`Esc` closes the viewer**.
+  `Ctrl+Q` shows the same live in the opposite panel.
+
+## Renderers
+
+| | `MDView` (default) | `GitHubStyle` |
+|---|---|---|
+| Plugin | [`rweijnen/MDView`](https://github.com/rweijnen/MDView) v0.2.4 | [Serg2000Mr `wlx-markdown-viewer-github-style`](https://github.com/Serg2000Mr/wlx-markdown-viewer-github-style) v1.3.1 |
+| Engine | pulldown-cmark + WebView2 | Markdig (GFM) + WebView2, Native AOT (no .NET install) |
+| `Esc` closes Lister | **yes** (page → WebMessage → `WM_CLOSE`) | **no** — WebView2 runs out-of-process, the plugin's `WH_KEYBOARD` hook never sees Esc (upstream PR #7 unmerged) |
+| Extras | dark mode follows Windows, clickable `.md` links, standalone `mdview.exe` | Mermaid diagrams, LaTeX math, emoji shortcodes, code copy button, 6 CSS themes |
+| Extensions claimed | `MD MARKDOWN` | `MD MARKDOWN MDOWN MDTEXT MDTXT MDWN MK MKD MKDN MKDOWN MDC` |
+
+Only one Markdown WLX is active at a time — switching renderers retires the
+other one's registration automatically.
 
 ## Requirements
 
@@ -22,14 +34,15 @@ GitHub-style Markdown preview inside Total Commander via the
 - PowerShell 5.1+ with permission to write into the Total Commander folder
   (run elevated if TC lives under `Program Files`).
 - Internet access to `github.com` for the plugin download
-  (or pre-place the zip — see “Offline use”).
+  (or pre-place the zips — see “Offline use”).
 
 ## Quick start
 
 ```powershell
 # 1. Close Total Commander (important — it rewrites wincmd.ini on exit).
 # 2. From this folder, run:
-.\Install-MarkdownViewerTC.ps1
+.\Install-MarkdownViewerTC.ps1                        # MDView, Esc works
+.\Install-MarkdownViewerTC.ps1 -Renderer GitHubStyle  # rich rendering, Esc broken
 ```
 
 Custom TC location, or TC already closed manually:
@@ -41,13 +54,14 @@ Custom TC location, or TC already closed manually:
 
 | Parameter      | Default              | Meaning                                                      |
 |----------------|----------------------|--------------------------------------------------------------|
+| `-Renderer`    | `MDView`             | `MDView` (working Esc) or `GitHubStyle` (Mermaid/math/emoji) |
 | `-TcPath`      | `C:\Utils\TotalCmd`  | TC folder (must contain `TOTALCMD.EXE`/`TOTALCMD64.EXE` + `wincmd.ini`) |
-| `-Version`     | `v0.2.4`             | MDView release tag to download                               |
+| `-Version`     | per renderer         | Release tag (`v0.2.4` / `v1.3.1`); custom tags skip the hash check with a warning |
 | `-LeaveRunning`| off                  | Skip the close/restart of TC (you closed it yourself)        |
 
-The script is **idempotent** — safe to re-run; it removes only its own previous
-registration lines (plus the retired `MarkdownViewGitHubStyle` ones) and re-adds
-its entry at the next free plugin index.
+The script is **idempotent** — safe to re-run and to switch renderers back and
+forth; it removes only its own plus the other renderer's registration lines and
+re-adds its entry at the next free plugin index.
 
 ## What the script does
 
@@ -55,37 +69,47 @@ its entry at the next free plugin index.
    (registry `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\*`).
 2. **Closes TC** (`TOTALCMD64`/`TOTALCMD`), unless `-LeaveRunning`.
    This matters: TC rewrites `wincmd.ini` on exit and would silently drop the edit.
-3. **Downloads** the release zip and verifies SHA-256:
-   - `MDView-v0.2.4.zip`
+3. **Downloads** the release zip(s) and verifies SHA-256 (pinned versions):
+   - MDView `MDView-v0.2.4.zip`
      `A1EDFFFB810FED3821C283BEF66027CF70DDDE65D0380EDFB6FC535D523F4170`
-4. **Installs files** to `<TcPath>\plugins\wlx\mdview\`:
-   `mdview.wlx` (32-bit TC), `mdview.wlx64` (64-bit TC), plus the standalone
-   `mdview.exe` viewer.
+   - GitHubStyle `wlx-markdown-viewer-github-style-release-x64.zip`
+     `D38BEFBAD0D70507CD131E3D1E4C624AABA89196BF53B6832379EBE83AFDAE88`
+   - GitHubStyle `wlx-markdown-viewer-github-style-release-x86.zip`
+     `2B3105BEC6E972FB6C13640B97190C5E92E5AE58030F315F1C3A3DFD6C72D4B0`
+4. **Installs files** — MDView to `<TcPath>\plugins\wlx\mdview\`
+   (`.wlx` + `.wlx64` + standalone `mdview.exe`); GitHubStyle to
+   `<TcPath>\plugins\wlx\MarkdownViewGitHubStyle\` (x64 set plus side-by-side
+   x86 `.wlx`/bridge/`dotnet-x86` runtime and `runtimes\win-x86`, without
+   overwriting the x64 root files). GitHubStyle additionally patches
+   `MarkdownView.ini` (leading-space ` MarkdownExtensions` typo fix,
+   `[Translate] Enabled=0`; GitHub CSS stays default).
 5. **Registers the lister plugin** — backs up `wincmd.ini`
    (`wincmd.ini.backup-<timestamp>` + first-run `wincmd.ini.pre-md-plugin.bak`),
-   retires any `MarkdownViewGitHubStyle` lines (only one Markdown WLX at a time),
-   then adds entries to `[ListerPlugins]` (32-bit TC) and `[ListerPlugins64]`
-   (64-bit TC), each with the detect filter taken verbatim from the plugin's
-   `ListGetDetectString` (`EXT="MD" | EXT="MARKDOWN"`) — never `.txt`.
-6. **Verifies** — files present, ini lines correct, old plugin gone, detect filter
-   set, and `ListLoad` + `ListGetDetectString` exported from the DLL matching
-   *this* PowerShell's bitness (64-bit PS → `.wlx64`; to check the 32-bit `.wlx`,
-   run the script from `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`).
+   retires the other renderer's lines, then adds entries to `[ListerPlugins]`
+   (32-bit TC) and `[ListerPlugins64]` (64-bit TC), each with a markdown-only
+   `N_detect` filter — never `.txt`.
+6. **Verifies** — files present, ini lines correct, other renderer gone, detect
+   filter set, and `ListLoad` (+ MDView's `ListGetDetectString`) exported from
+   the DLL matching *this* PowerShell's bitness (64-bit PS → `.wlx64`; to check
+   the 32-bit `.wlx`, run from
+   `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`).
 7. **Restarts TC** (unless `-LeaveRunning`).
 
 ## Verify it works
 
-- `F3` on any `.md` file → tables, task lists, strikethrough, code blocks,
-  clickable `.md` links; dark mode follows Windows.
+- `F3` on any `.md` file → formatted page (MDView: tables, task lists,
+  strikethrough, code blocks, clickable `.md` links; GitHubStyle additionally:
+  Mermaid, math, emoji, copy button).
 - `Ctrl+Q` on the same file → same rendering live in the opposite panel.
-- **`Esc` closes the viewer** (also in Quick View).
+- MDView: **`Esc` closes the viewer** (also in Quick View). GitHubStyle: close
+  with Lister `X` or `Alt+F4` (Esc is swallowed — known limitation).
 - `4` in Lister → cycles plugins if another viewer grabs `.md` first.
 - Negative check: rename a copy to `.txt` → the plugin must *not* claim it
   (extension scoping intact).
 
 ## Resulting configuration (reference)
 
-`wincmd.ini`:
+MDView (`-Renderer MDView`):
 
 ```ini
 [ListerPlugins]
@@ -96,8 +120,22 @@ its entry at the next free plugin index.
 0_detect="EXT="MD" | EXT="MARKDOWN""
 ```
 
+GitHubStyle (`-Renderer GitHubStyle`):
+
+```ini
+[ListerPlugins]
+0=C:\Utils\TotalCmd\plugins\wlx\MarkdownViewGitHubStyle\MarkdownView.wlx
+0_detect="EXT="MD" | EXT="MARKDOWN" | EXT="MDOWN" | EXT="MDTEXT" | EXT="MDTXT" | EXT="MDWN" | EXT="MK" | EXT="MKD" | EXT="MKDN" | EXT="MKDOWN" | EXT="MDC""
+[ListerPlugins64]
+0=C:\Utils\TotalCmd\plugins\wlx\MarkdownViewGitHubStyle\MarkdownView.wlx64
+0_detect="EXT="MD" | EXT="MARKDOWN" | EXT="MDOWN" | EXT="MDTEXT" | EXT="MDTXT" | EXT="MDWN" | EXT="MK" | EXT="MKD" | EXT="MKDN" | EXT="MKDOWN" | EXT="MDC""
+```
+
 (`N` auto-adjusts to the next free index if other lister plugins exist.
-`$checksum$` lines are TC's own bookkeeping — leave them alone.)
+`$checksum$` lines are TC's own bookkeeping — leave them alone.
+GitHubStyle's `MarkdownView.ini`: `[Renderer] CustomCSS=css\github.css`,
+`CustomCSSDark=css\github.dark.css`, `[Translate] Enabled=0`,
+`[FastFont] Enabled=1`.)
 
 ## Troubleshooting
 
@@ -106,24 +144,22 @@ its entry at the next free plugin index.
 | Blank preview | WebView2 Runtime missing → install from the link above, restart TC. |
 | Registration “vanishes” | TC was running during install and rewrote `wincmd.ini` on exit → close TC first (no `-LeaveRunning`), re-run. |
 | Plugin not picked for `.md` | Another lister plugin has priority → press `4` in Lister to cycle. |
-| Roll back | Restore `wincmd.ini.pre-md-plugin.bak` (TC closed), optionally delete `plugins\wlx\mdview\`. |
+| Esc doesn't close (GitHubStyle) | Expected — upstream limitation, not a config error. Switch with `.\Install-MarkdownViewerTC.ps1 -Renderer MDView`. |
+| Roll back | Restore `wincmd.ini.pre-md-plugin.bak` (TC closed), optionally delete `plugins\wlx\mdview\` and/or `plugins\wlx\MarkdownViewGitHubStyle\`. |
 
 ## Offline use
 
-Pre-download the zip into `$env:TEMP\mdview-tc\`
-(`MDView-v0.2.4.zip`); the script skips downloading when the file is already
-there (hash still verified).
+Pre-download the zip(s) into `$env:TEMP\mdview-tc\`
+(`MDView-v0.2.4.zip`, or the two `wlx-markdown-viewer-github-style-*.zip` files);
+the script skips downloading files that are already there (hash still verified
+for pinned versions).
 
-## Why this plugin
+## Why two renderers
 
-The previous pick (Serg2000Mr `wlx-markdown-viewer-github-style` v1.3.1) renders
-beautifully but **swallows Esc**: WebView2 runs in a separate Chromium process
-the plugin's `WH_KEYBOARD` hook never sees, so Esc never reaches Total Commander
-and the Lister won't close (upstream PR #7 fixes this via
-`add_AcceleratorKeyPressed` forwarding, but it was closed unmerged — the shipped
-`MarkdownView.wlx64` contains no `AcceleratorKeyPressed` handler and its rendered
-HTML has no Esc listener at all). MDView handles it properly: the page posts an
-Esc message that the plugin turns into `WM_CLOSE` to TC's Lister window.
-Trade-off: MDView is pulldown-cmark based — solid GFM tables/task lists but no
-Mermaid diagrams, LaTeX math, or emoji shortcodes. Esc that actually exits won
-over the richer rendering.
+First pick was Serg2000Mr `wlx-markdown-viewer-github-style` v1.3.1 for its
+faithful GitHub rendering — but it **swallows Esc** (separate Chromium process,
+unmerged upstream PR #7; verified absent from the shipped binary and its HTML),
+which broke the close-L popped-viewer habit. MDView handles Esc properly via
+page → WebMessage → `WM_CLOSE`. Since the rendering difference is real
+(Mermaid/math/emoji vs. plain GFM), both stay one `-Renderer` flag apart instead
+of forcing the trade-off.
