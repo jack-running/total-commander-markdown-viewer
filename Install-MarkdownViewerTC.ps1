@@ -7,12 +7,12 @@
   Reusable installer with a renderer choice. Safe to re-run (idempotent):
   it removes only its own previous registration lines (plus the *other*
   renderer's lines, so exactly one Markdown WLX stays active) and re-adds
-  its entry at the next free plugin index.
+  its entry as plugin #0, so TC tries it before any other lister plugin.
 
   Renderers (pick with -Renderer):
     MDView       - rweijnen/MDView. Forwards Esc from the page to TC, so Esc
                    closes the viewer again. GFM tables/task lists, dark mode
-                   follows Windows. No Mermaid, LaTeX math, or emoji shortcodes.
+                   follows TC's dark mode. No Mermaid, LaTeX math, or emoji shortcodes.
     GitHubStyle  - Serg2000Mr wlx-markdown-viewer-github-style. Rich GitHub
                    rendering (Mermaid, LaTeX math, emoji, code copy button,
                    6 CSS themes) but swallows the Esc key: WebView2 runs in a
@@ -20,21 +20,33 @@
                    never sees (upstream PR #7 unmerged in v1.3.1).
 
   What it does:
-    1. Checks Total Commander dir + WebView2 Runtime (warns only).
-    2. Closes running TOTALCMD.EXE / TOTALCMD64.EXE (unless -LeaveRunning).
-    3. Downloads the release zip(s) from GitHub and verifies SHA-256.
+    1. Checks the Total Commander dir, finds the wincmd.ini TC really uses,
+       checks the WebView2 Runtime (warns only).
+    2. Closes running TOTALCMD.EXE / TOTALCMD64.EXE normally, so TC saves its
+       settings first (forced only if it does not exit; skipped with -LeaveRunning).
+    3. Downloads the release zip(s) from GitHub and verifies SHA-256
+       (a corrupt cached zip is downloaded again once).
     4. Copies plugin files to <TcPath>\plugins\wlx\<plugindir>\.
        GitHubStyle additionally patches MarkdownView.ini (leading-space typo
        fix, [Translate] Enabled=0).
     5. Backs up wincmd.ini, retires the other renderer's registration, then
-       registers the plugin in [ListerPlugins] (32-bit TC) and [ListerPlugins64]
-       (64-bit TC) with a markdown-only EXT detect filter (never hijacks .txt).
+       registers the plugin as entry 0 in [ListerPlugins] (32-bit TC) and
+       [ListerPlugins64] (64-bit TC) with a markdown-only EXT detect filter
+       (never hijacks .txt). Other plugins keep their order, shifted by one.
     6. Verifies files, ini lines, and that ListLoad is exported from the
        DLL matching the PowerShell bitness. Restarts TC (unless -LeaveRunning).
 
 .PARAMETER TcPath
-  Total Commander install dir (must contain TOTALCMD.EXE or TOTALCMD64.EXE
-  and wincmd.ini). Default 'C:\Utils\TotalCmd'.
+  Total Commander install dir (must contain TOTALCMD.EXE or TOTALCMD64.EXE).
+  Default 'C:\Utils\TotalCmd'.
+
+.PARAMETER IniPath
+  wincmd.ini to edit. Default: auto-detected the way TC does it
+  (UseIniInProgramDir in <TcPath>\wincmd.ini, else the IniFileName registry
+  value, else <TcPath>\wincmd.ini, else %APPDATA%\GHISLER\wincmd.ini;
+  AlternateUserIni and RedirectSection are followed). Pass it when TC is
+  started with /i=<file>; it is then used as given (RedirectSection is
+  still followed).
 
 .PARAMETER Renderer
   'MDView' (default, Esc works) or 'GitHubStyle' (richer rendering, Esc broken).
@@ -44,8 +56,8 @@
   GitHubStyle 'v1.3.1'.
 
 .PARAMETER LeaveRunning
-  Do not close/restart Total Commander. Close it yourself first, otherwise
-  TC overwrites wincmd.ini on exit and drops the registration.
+  Do not close/restart Total Commander. Close it yourself first: the script
+  refuses to run while TC is running, because TC overwrites wincmd.ini on exit.
 
 .EXAMPLE
   .\Install-MarkdownViewerTC.ps1
@@ -62,6 +74,7 @@
 [CmdletBinding()]
 param(
   [string]$TcPath = 'C:\Utils\TotalCmd',
+  [string]$IniPath,
   [ValidateSet('MDView','GitHubStyle')]
   [string]$Renderer = 'MDView',
   [string]$Version,
@@ -69,6 +82,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # PS 5.1's progress bar slows Invoke-WebRequest down a lot
+# PS 5.1 on older .NET may not offer TLS 1.2 by default; github.com requires it.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 # Per-renderer catalog. Detect filters mirror each plugin's own claim:
 # MDView's ListGetDetectString (src/lib.rs); GitHubStyle's MarkdownExtensions ini key.
@@ -113,18 +129,92 @@ function Assert-True([bool]$Cond, [string]$Msg) {
   else { Write-Host "  [FAIL] $Msg" -ForegroundColor Red; throw "Verification failed: $Msg" }
 }
 
+# ---------- ini helpers ----------
+# TC writes wincmd.ini in the system ANSI codepage unless the file starts with a
+# BOM (UTF-16 / UTF-8 ini files are allowed too); keep whatever the file uses.
+function Get-IniEncoding([string]$File) {
+  $b = [byte[]]::new(3)
+  $fs = [System.IO.File]::OpenRead($File)
+  try { $n = $fs.Read($b, 0, 3) } finally { $fs.Dispose() }
+  if ($n -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { return [System.Text.UnicodeEncoding]::new($false, $true) }
+  if ($n -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { return [System.Text.UTF8Encoding]::new($true) }
+  # [Text.Encoding]::Default is UTF-8 on PowerShell 7, so ask for the ANSI codepage explicitly.
+  try { return [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage) }
+  catch { return [System.Text.Encoding]::Default }
+}
+
+function Get-IniValue([string]$File, [string]$Section, [string]$Key) {
+  if (-not (Test-Path -LiteralPath $File)) { return $null }
+  $inSec = $false
+  foreach ($l in [System.IO.File]::ReadAllLines($File, (Get-IniEncoding $File))) {
+    if ($l -match '^\s*\[(.*)\]\s*$') { $inSec = ($Matches[1] -eq $Section); continue }
+    if ($inSec -and $l -match "^\s*$([regex]::Escape($Key))\s*=(.*)$") { return $Matches[1].Trim() }
+  }
+  return $null
+}
+
+# Paths in TC settings may use %COMMANDER_PATH% and other environment variables;
+# relative ones are taken relative to $BaseDir.
+function Expand-TcPath([string]$Path, [string]$BaseDir) {
+  $p = $Path.Trim().Trim('"')
+  $p = $p -ireplace '%COMMANDER_PATH%', $TcPath.TrimEnd('\')
+  $p = [Environment]::ExpandEnvironmentVariables($p)
+  if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $BaseDir $p }
+  return $p
+}
+
+# Lines of one section (without its header); empty if the section is missing.
+function Get-SectionLines([string[]]$Lines, [string]$Section) {
+  $si = [Array]::IndexOf($Lines, $Section)
+  if ($si -lt 0) { return @() }
+  $out = @()
+  for ($i = $si + 1; $i -lt $Lines.Count; $i++) {
+    if ($Lines[$i] -match '^\[.*\]$') { break }
+    $out += $Lines[$i]
+  }
+  return $out
+}
+
 # ---------- 1. preconditions ----------
 Write-Step "Checking preconditions (TcPath=$TcPath, Renderer=$Renderer $Version)"
 Assert-True (Test-Path $TcPath) "TC directory exists: $TcPath"
 $TcExe64 = Join-Path $TcPath 'TOTALCMD64.EXE'
 $TcExe32 = Join-Path $TcPath 'TOTALCMD.EXE'
 Assert-True ((Test-Path $TcExe64) -or (Test-Path $TcExe32)) 'TOTALCMD64.EXE or TOTALCMD.EXE present'
-$WincmdIni = Join-Path $TcPath 'wincmd.ini'
-Assert-True (Test-Path $WincmdIni) 'wincmd.ini present next to the exe'
 
-$wv = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\*' -ErrorAction SilentlyContinue |
-      Where-Object { $_.name -match 'WebView2' } | Select-Object -First 1
-if ($wv) { Write-Host "  [OK] WebView2 Runtime found ($($wv.pv))" -ForegroundColor Green }
+# Locate the wincmd.ini TC actually uses (TC help, "wincmd.ini" / "Configuration").
+$ProgIni = Join-Path $TcPath 'wincmd.ini'
+if ($IniPath) {
+  $WincmdIni = $IniPath; $IniSource = '-IniPath'
+} elseif ((Test-Path $ProgIni) -and (([int](Get-IniValue $ProgIni 'Configuration' 'UseIniInProgramDir')) -band 1)) {
+  $WincmdIni = $ProgIni; $IniSource = 'UseIniInProgramDir in program dir'
+} else {
+  $RegIni = $null
+  foreach ($hive in 'HKCU:','HKLM:') {
+    try { $RegIni = (Get-ItemProperty "$hive\Software\Ghisler\Total Commander" -Name IniFileName -ErrorAction Stop).IniFileName } catch {}
+    if ($RegIni) { $IniSource = "registry $hive\Software\Ghisler\Total Commander\IniFileName"; break }
+  }
+  if ($RegIni) { $WincmdIni = Expand-TcPath $RegIni $TcPath }
+  elseif (Test-Path $ProgIni) { $WincmdIni = $ProgIni; $IniSource = 'program dir' }
+  else { $WincmdIni = Join-Path $env:APPDATA 'GHISLER\wincmd.ini'; $IniSource = '%APPDATA% default' }
+}
+$AltIni = if (-not $IniPath) { Get-IniValue $WincmdIni 'Configuration' 'AlternateUserIni' }
+if ($AltIni) {
+  $WincmdIni = Expand-TcPath $AltIni $TcPath; $IniSource += ' -> AlternateUserIni'
+}
+Assert-True (Test-Path $WincmdIni) "wincmd.ini found: $WincmdIni ($IniSource)"
+
+# WebView2 Runtime registers under its EdgeUpdate client GUID, per machine
+# (64-bit / 32-bit Windows) or per user; 'pv' is empty or 0.0.0.0 when removed.
+$Wv2Guid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+$Wv2Ver = $null
+foreach ($k in "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$Wv2Guid",
+               "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$Wv2Guid",
+               "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$Wv2Guid") {
+  try { $v = (Get-ItemProperty $k -Name pv -ErrorAction Stop).pv } catch { $v = $null }
+  if ($v -and $v -ne '0.0.0.0') { $Wv2Ver = $v; break }
+}
+if ($Wv2Ver) { Write-Host "  [OK] WebView2 Runtime found ($Wv2Ver)" -ForegroundColor Green }
 else { Write-Warning 'WebView2 Runtime not found in registry. Plugin will show a blank page until you install it: https://developer.microsoft.com/en-us/microsoft-edge/webview2/' }
 
 if ($Renderer -eq 'GitHubStyle') {
@@ -132,32 +222,53 @@ if ($Renderer -eq 'GitHubStyle') {
 }
 
 # ---------- 2. close TC (it rewrites wincmd.ini on exit) ----------
+# Close it normally so it saves its own settings (tabs, history) first; the
+# ini is edited only after it has exited.
+$TcRunningExe = $null
 if (-not $LeaveRunning) {
   Write-Step 'Closing Total Commander'
-  foreach ($n in 'TOTALCMD64','TOTALCMD') {
-    $p = Get-Process $n -ErrorAction SilentlyContinue
-    if ($p) { $p | Stop-Process -Force; Write-Host "  closed $n" }
+  foreach ($p in @(Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue)) {
+    if (-not $TcRunningExe) { try { $TcRunningExe = $p.Path } catch {} }
+    if ($p.CloseMainWindow()) { Write-Host "  asked $($p.ProcessName) (pid $($p.Id)) to close" }
+    else { Write-Warning "$($p.ProcessName) (pid $($p.Id)) has no main window (minimized to tray?), forcing it closed"; $p | Stop-Process -Force }
   }
-  Start-Sleep 2
+  $deadline = (Get-Date).AddSeconds(20)
+  while ((Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+  $left = Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue
+  if ($left) {
+    Write-Warning 'Total Commander did not exit within 20 s (confirmation dialog open?), forcing it closed; its unsaved settings from this session are lost.'
+    $left | Stop-Process -Force
+    Start-Sleep 2
+  }
   Assert-True (-not (Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue)) 'no TC process left'
 } else {
-  Write-Warning 'LeaveRunning: make sure Total Commander is CLOSED, or it will overwrite wincmd.ini on exit.'
+  Assert-True (-not (Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue)) 'LeaveRunning: Total Commander is closed (it would overwrite wincmd.ini on exit)'
 }
 
 # ---------- 3. download + hash check ----------
 Write-Step "Downloading $Renderer $Version"
 $DlDir = Join-Path $env:TEMP 'mdview-tc'
 New-Item -ItemType Directory -Force -Path $DlDir | Out-Null
+function Save-Download([string]$Url, [string]$Dest) {
+  # Download to a .part file first so an interrupted transfer never looks like a cached zip.
+  $part = "$Dest.part"
+  Invoke-WebRequest -Uri $Url -OutFile $part -UseBasicParsing
+  Move-Item -LiteralPath $part -Destination $Dest -Force
+}
 $ZipPaths = @()
 foreach ($z in $P.Zips) {
   # Zip file names embed the default version; rebuild them when -Version overrides it.
   $file = $z.File -replace [regex]::Escape($P.DefaultVersion.TrimStart('v')), $Version.TrimStart('v')
   $dest = Join-Path $DlDir $file
-  if (-not (Test-Path $dest)) {
-    Invoke-WebRequest -Uri "$BaseUrl/$file" -OutFile $dest
-  }
+  if (-not (Test-Path $dest)) { Save-Download "$BaseUrl/$file" $dest }
   $hash = (Get-FileHash $dest -Algorithm SHA256).Hash
   if ($Version -eq $P.DefaultVersion) {
+    if ($hash -ne $z.Sha256) {
+      Write-Warning "cached $file has the wrong SHA-256 (corrupt or replaced), downloading it again"
+      Remove-Item -LiteralPath $dest -Force
+      Save-Download "$BaseUrl/$file" $dest
+      $hash = (Get-FileHash $dest -Algorithm SHA256).Hash
+    }
     Assert-True ($hash -eq $z.Sha256) "$file SHA-256 matches"
   } else {
     Write-Warning "custom -Version, recorded hash does not apply; downloaded $file SHA-256 = $hash"
@@ -221,13 +332,6 @@ if ($Renderer -eq 'MDView') {
 
 # ---------- 5. register in wincmd.ini ----------
 Write-Step 'Registering lister plugin in wincmd.ini'
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-Copy-Item $WincmdIni "$WincmdIni.backup-$stamp" -Force
-if (-not (Test-Path "$WincmdIni.pre-md-plugin.bak")) { Copy-Item $WincmdIni "$WincmdIni.pre-md-plugin.bak" -Force }
-Write-Host "  backup: $WincmdIni.backup-$stamp"
-
-$enc   = [System.Text.Encoding]::Default   # TC writes wincmd.ini in system ANSI codepage
-$lines = [System.IO.File]::ReadAllLines($WincmdIni, $enc)
 
 function Register-Section {
   param([string[]]$Lines, [string]$Section, [string]$DllFile)
@@ -252,7 +356,7 @@ function Register-Section {
     $out.Add($l)
   }
   $Lines = $out.ToArray()
-  # pass 2: find section (create it if missing), pick next free index.
+  # pass 2: find section (create it if missing).
   # Compare section names with -eq / IndexOf (exact): -match on
   # '[ListerPlugins]' would also match the '[ListerPlugins64]' prefix.
   $si = [Array]::IndexOf($Lines, $Section)
@@ -266,29 +370,71 @@ function Register-Section {
   }
   $end = $Lines.Count
   for ($i = $si + 1; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\[.*\]$') { $end = $i; break } }
-  $used = @()
-  for ($i = $si + 1; $i -lt $end; $i++) { if ($Lines[$i] -match '^(\d+)=') { $used += [int]$Matches[1] } }
-  $idx = 0; while ($used -contains $idx) { $idx++ }
-  $entry = @("$idx=$DllFile", "$idx`_detect=`"$Detect`"")
-  $head = $Lines[0..$si]
   $body = @(); if ($end - $si - 1 -gt 0) { $body = $Lines[($si+1)..($end-1)] }
+  # pass 3: TC uses the first plugin (lowest index) whose detect string matches,
+  # so ours becomes entry 0. The other plugins keep their relative order and are
+  # renumbered 1..n (all keys of one entry, N= and N_*=, move together); lines
+  # without an index stay in front, blank lines at the end.
+  $groups = @{}   # not [ordered]: its int indexer means position, not key
+  $other = @(); $blank = @()
+  foreach ($l in $body) {
+    if ($l -match '^(\d+)((?:_[^=]*)?=.*)$') {
+      $n = [int]$Matches[1]
+      if (-not $groups.Contains($n)) { $groups[$n] = New-Object System.Collections.Generic.List[string] }
+      $groups[$n].Add($Matches[2])
+    } elseif ($l.Trim() -eq '') { $blank += $l }
+    else { $other += $l }
+  }
+  $entries = @("0=$DllFile", "0_detect=`"$Detect`"")
+  $next = 1
+  foreach ($n in ($groups.Keys | Sort-Object)) {
+    foreach ($rest in $groups[$n]) { $entries += "$next$rest" }
+    $next++
+  }
+  $head = $Lines[0..$si]
   $tail = @(); if ($end -lt $Lines.Count) { $tail = $Lines[$end..($Lines.Count-1)] }
-  return @($head + $body + $entry + $tail)
+  return @($head + $other + $entries + $blank + $tail)
 }
 
+# A section may live in another file via 'RedirectSection=<file>' inside it.
+$Targets = [ordered]@{}
 $Dll32 = "$Dest\$($P.Dll32)"; $Dll64 = "$Dest\$($P.Dll64)"
-$lines = Register-Section $lines '[ListerPlugins]'   $Dll32
-$lines = Register-Section $lines '[ListerPlugins64]' $Dll64
-[System.IO.File]::WriteAllLines($WincmdIni, $lines, $enc)
-
-$final = [System.IO.File]::ReadAllText($WincmdIni, $enc)
-$esc32 = [regex]::Escape($P.Dll32); $esc64 = [regex]::Escape($P.Dll64)
-Assert-True ($final -match "\[ListerPlugins\][^\[]*$esc32\r?\n\d+_detect=") "[ListerPlugins] has $($P.Dll32) + detect"
-Assert-True ($final -match "\[ListerPlugins64\][^\[]*$esc64\r?\n\d+_detect=") "[ListerPlugins64] has $($P.Dll64) + detect"
-foreach ($s in $Superseded) {
-  Assert-True ($final -notmatch $s) "other renderer retired ($s)"
+foreach ($t in @(@{ Name = 'ListerPlugins'; Dll = $Dll32 }, @{ Name = 'ListerPlugins64'; Dll = $Dll64 })) {
+  $file = $WincmdIni
+  $redir = Get-IniValue $WincmdIni $t.Name 'RedirectSection'
+  if ($redir) {
+    $file = Expand-TcPath $redir (Split-Path $WincmdIni -Parent)
+    Write-Host "  [$($t.Name)] is redirected to $file"
+    Assert-True (Test-Path $file) "redirected ini exists: $file"
+  }
+  if (-not $Targets.Contains($file)) { $Targets[$file] = @() }
+  $Targets[$file] += $t
 }
-Assert-True ($final -notmatch 'EXT="TXT"') 'detect filter does not claim .txt'
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+foreach ($file in $Targets.Keys) {
+  Copy-Item $file "$file.backup-$stamp" -Force
+  if (-not (Test-Path "$file.pre-md-plugin.bak")) { Copy-Item $file "$file.pre-md-plugin.bak" -Force }
+  Write-Host "  backup: $file.backup-$stamp"
+
+  $enc   = Get-IniEncoding $file
+  $lines = [System.IO.File]::ReadAllLines($file, $enc)
+  foreach ($t in $Targets[$file]) { $lines = Register-Section $lines "[$($t.Name)]" $t.Dll }
+  [System.IO.File]::WriteAllLines($file, $lines, $enc)
+
+  $final = [System.IO.File]::ReadAllLines($file, $enc)
+  foreach ($t in $Targets[$file]) {
+    $sec = Get-SectionLines $final "[$($t.Name)]"
+    $idx = @($sec | Where-Object { $_ -match '^\d+=' })
+    Assert-True ($idx.Count -gt 0 -and $idx[0] -eq "0=$($t.Dll)" -and $sec -contains "0_detect=`"$Detect`"") "[$($t.Name)] entry 0 is $(Split-Path $t.Dll -Leaf) + detect"
+    $nums = @($idx | ForEach-Object { [int]($_ -replace '=.*$', '') })
+    Assert-True (-not (Compare-Object $nums @(0..($nums.Count-1)) -SyncWindow 0)) "[$($t.Name)] plugin indices are 0..$($nums.Count-1)"
+    foreach ($s in $Superseded) {
+      Assert-True (-not ($sec -match $s)) "[$($t.Name)] other renderer retired ($s)"
+    }
+    Assert-True (-not ($sec -match 'EXT="TXT"' | Where-Object { $_ -match '^0_detect=' })) "[$($t.Name)] detect filter does not claim .txt"
+  }
+}
 
 # ---------- 6. DLL export sanity (bitness of THIS powershell) ----------
 Write-Step 'Verifying plugin DLL exports'
@@ -313,11 +459,13 @@ foreach ($exp in $P.Exports) {
 # ---------- 7. restart ----------
 if (-not $LeaveRunning) {
   Write-Step 'Starting Total Commander'
-  Start-Process (if (Test-Path $TcExe64) { $TcExe64 } else { $TcExe32 })
+  # Restart the edition that was running; otherwise prefer 64-bit.
+  $exe = if ($TcRunningExe -and (Test-Path $TcRunningExe)) { $TcRunningExe } elseif (Test-Path $TcExe64) { $TcExe64 } else { $TcExe32 }
+  Start-Process $exe
 }
 Write-Step 'Done'
 if ($Renderer -eq 'MDView') {
   Write-Host 'Use: F3 on any .md = formatted view | Ctrl+Q = live preview | 4 = cycle plugins | ESC = close.'
 } else {
-  Write-Host 'Use: F3 on any .md = formatted view | Ctrl+Q = live preview | 4 = cycle plugins. NOTE: Esc is swallowed by this renderer — close Lister with X or Alt+F4.'
+  Write-Host 'Use: F3 on any .md = formatted view | Ctrl+Q = live preview | 4 = cycle plugins. NOTE: Esc is swallowed by this renderer: close Lister with X or Alt+F4.'
 }
