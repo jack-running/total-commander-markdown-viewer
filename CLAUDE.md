@@ -17,6 +17,7 @@ Keep it ASCII-only: PS 5.1 reads BOM-less UTF-8 as ANSI.
 ```powershell
 .\Install-MarkdownViewerTC.ps1                         # MDView (default)
 .\Install-MarkdownViewerTC.ps1 -Renderer GitHubStyle
+.\Install-MarkdownViewerTC.ps1 -Renderer EdgeViewer
 .\Install-MarkdownViewerTC.ps1 -TcPath 'D:\Portable\TotalCmd' -LeaveRunning
 ```
 
@@ -40,9 +41,15 @@ behavior should add matching `Assert-True` checks rather than silent assumptions
 
 - **Renderer catalog (`$Plugins` hashtable)** drives everything per renderer:
   plugin dir name, GitHub repo, default version, release zip names + pinned
-  SHA-256, 32/64-bit DLL names, the `N_detect` filter string, `Superseded` regexes
-  (the *other* renderer's lines to retire), and DLL exports to verify. Adding or
-  bumping a renderer should mostly be a catalog edit.
+  SHA-256, 32/64-bit DLL names, the `N_detect` filter string, `Match` (regex on
+  a registration's dll path, `[\\/]` so Linux test paths match too),
+  `Exclusive`, and DLL exports to verify. Bumping a renderer is a catalog edit;
+  adding one also needs its file-copy branch in step 4.
+- **Which registrations are "ours"** (`Test-OurEntry`): any entry matching an
+  `Exclusive` renderer (MDView, GitHubStyle: Markdown-only plugins), but for
+  non-exclusive EdgeViewer (a general viewer the user may register for HTML/PDF)
+  only an entry whose `N_detect` equals its markdown `Detect`. Ours = dropped and
+  re-added; the user's own EdgeViewer entry is kept and reported.
 - **Steps run in order**: preconditions (incl. locating the real `wincmd.ini`) →
   close TC → download + hash check → extract/copy files → register in
   `wincmd.ini` → DLL export check → restart TC. TC must be closed before editing
@@ -65,9 +72,9 @@ behavior should add matching `Assert-True` checks rather than silent assumptions
   (leading-space ` MarkdownExtensions` typo, `[Translate] Enabled=0`).
 - **`Register-Section`** is the idempotency core, applied to `[ListerPlugins]`
   (32-bit TC → `.wlx`) and `[ListerPlugins64]` (64-bit TC → `.wlx64`):
-  - pass 1 drops this renderer's own lines, `Superseded` lines, their immediately
-    following `N_detect` line, and TC junk `N=1` lines — never a foreign plugin's
-    `N_detect`;
+  - pass 1 drops every "ours" entry (all three renderers, so only one Markdown
+    WLX stays) with the same-index `N_detect` line directly after it, and TC
+    junk `N=1` lines — never a foreign plugin's `N_detect`;
   - pass 2 locates the section by exact string (`IndexOf`/`-eq`, *not* `-match`,
     since `[ListerPlugins]` would prefix-match `[ListerPlugins64]`) and creates it
     if missing;
@@ -93,6 +100,10 @@ script, update the README's Renderers table, "What the script does", "Resulting
 configuration", and "Offline use" sections too. The comment-based help block at
 the top of the script also mirrors parameters and steps.
 
-Key domain fact behind the two renderers: GitHubStyle cannot close Lister on `Esc`
-(WebView2 runs out of process, so the plugin's `WH_KEYBOARD` hook never sees it;
-upstream PR #7 unmerged), which is why MDView is the default.
+Key domain fact behind the renderers: with WebView2 the page runs out of
+process, so a plugin must (a) `MoveFocus` into the WebView2 on `WM_SETFOCUS` for
+PgUp/PgDn to work without a click, and (b) relay Esc to Lister itself (page JS →
+WebMessage → `WM_CLOSE`, or `AcceleratorKeyPressed` → `WM_KEYDOWN` to the
+parent). GitHubStyle does (a) but not (b) (its `WH_KEYBOARD` hook never sees the
+keys; upstream PR #7 unmerged); MDView does (b) but not (a); EdgeViewer does
+both. MDView stays the default until EdgeViewer is confirmed on a real install.

@@ -6,7 +6,7 @@
 .DESCRIPTION
   Reusable installer with a renderer choice. Safe to re-run (idempotent):
   it removes only its own previous registration lines (plus the *other*
-  renderer's lines, so exactly one Markdown WLX stays active) and re-adds
+  renderers' lines, so exactly one Markdown WLX stays active) and re-adds
   its entry as plugin #0, so TC tries it before any other lister plugin.
 
   Renderers (pick with -Renderer):
@@ -18,6 +18,11 @@
                    6 CSS themes) but swallows the Esc key: WebView2 runs in a
                    separate Chromium process the plugin's WH_KEYBOARD hook
                    never sees (upstream PR #7 unmerged in v1.3.1).
+    EdgeViewer   - rg-software wlx-edge-viewer. General-purpose WebView2 viewer,
+                   registered here for .md/.markdown only. GitHub CSS (light/dark),
+                   highlight.js, MathJax, Mermaid, alerts, all bundled (offline).
+                   Moves keyboard focus into the page and relays keys to TC, so
+                   Esc closes Lister and PgUp/PgDn scroll without a click first.
 
   What it does:
     1. Checks the Total Commander dir, finds the wincmd.ini TC really uses,
@@ -28,8 +33,8 @@
        (a corrupt cached zip is downloaded again once).
     4. Copies plugin files to <TcPath>\plugins\wlx\<plugindir>\.
        GitHubStyle additionally patches MarkdownView.ini (leading-space typo
-       fix, [Translate] Enabled=0).
-    5. Backs up wincmd.ini, retires the other renderer's registration, then
+       fix, [Translate] Enabled=0). EdgeViewer keeps an existing edgeviewer.ini.
+    5. Backs up wincmd.ini, retires the other renderers' registrations, then
        registers the plugin as entry 0 in [ListerPlugins] (32-bit TC) and
        [ListerPlugins64] (64-bit TC) with a markdown-only EXT detect filter
        (never hijacks .txt). Other plugins keep their order, shifted by one.
@@ -49,11 +54,12 @@
   still followed).
 
 .PARAMETER Renderer
-  'MDView' (default, Esc works) or 'GitHubStyle' (richer rendering, Esc broken).
+  'MDView' (default, Esc works), 'GitHubStyle' (richer rendering, Esc broken)
+  or 'EdgeViewer' (rich rendering, Esc and PgUp/PgDn work).
 
 .PARAMETER Version
   Release tag of the chosen renderer. Defaults: MDView 'v0.2.4',
-  GitHubStyle 'v1.3.1'.
+  GitHubStyle 'v1.3.1', EdgeViewer 'v1.2.11'.
 
 .PARAMETER LeaveRunning
   Do not close/restart Total Commander. Close it yourself first: the script
@@ -68,6 +74,10 @@
   # rich GitHub rendering instead (Mermaid/math/emoji), Esc won't close Lister
 
 .EXAMPLE
+  .\Install-MarkdownViewerTC.ps1 -Renderer EdgeViewer
+  # rich rendering (Mermaid/math/highlighting) with working Esc and PgUp/PgDn
+
+.EXAMPLE
   .\Install-MarkdownViewerTC.ps1 -TcPath 'D:\Portable\TotalCmd' -LeaveRunning
   # custom path, TC already closed manually
 #>
@@ -75,7 +85,7 @@
 param(
   [string]$TcPath = 'C:\Utils\TotalCmd',
   [string]$IniPath,
-  [ValidateSet('MDView','GitHubStyle')]
+  [ValidateSet('MDView','GitHubStyle','EdgeViewer')]
   [string]$Renderer = 'MDView',
   [string]$Version,
   [switch]$LeaveRunning
@@ -87,7 +97,13 @@ $ProgressPreference = 'SilentlyContinue'   # PS 5.1's progress bar slows Invoke-
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 # Per-renderer catalog. Detect filters mirror each plugin's own claim:
-# MDView's ListGetDetectString (src/lib.rs); GitHubStyle's MarkdownExtensions ini key.
+# MDView's ListGetDetectString (src/lib.rs); GitHubStyle's MarkdownExtensions ini key;
+# EdgeViewer's [Extensions] Markdown= key.
+# Match finds a renderer's registration in [ListerPlugins*] (regex on the dll
+# path; [\\/] also matches Linux test paths). Exclusive renderers are
+# Markdown-only plugins, so any registration of them is ours to replace.
+# EdgeViewer is a general viewer the user may have registered for other types
+# too: only an entry carrying its markdown Detect string is treated as ours.
 $Plugins = @{
   MDView = @{
     DirName = 'mdview'
@@ -98,7 +114,7 @@ $Plugins = @{
     )
     Dll32 = 'mdview.wlx'; Dll64 = 'mdview.wlx64'
     Detect = 'EXT="MD" | EXT="MARKDOWN"'
-    Superseded = @('MarkdownViewGitHubStyle')
+    Match = '[\\/]mdview\.wlx(64)?$'; Exclusive = $true
     Exports = @('ListLoad','ListGetDetectString')
   }
   GitHubStyle = @{
@@ -111,8 +127,20 @@ $Plugins = @{
     )
     Dll32 = 'MarkdownView.wlx'; Dll64 = 'MarkdownView.wlx64'
     Detect = 'EXT="MD" | EXT="MARKDOWN" | EXT="MDOWN" | EXT="MDTEXT" | EXT="MDTXT" | EXT="MDWN" | EXT="MK" | EXT="MKD" | EXT="MKDN" | EXT="MKDOWN" | EXT="MDC"'
-    Superseded = @('wlx\\mdview\\','mdview\.wlx')
+    Match = '[\\/]MarkdownViewGitHubStyle[\\/]'; Exclusive = $true
     Exports = @('ListLoad')
+  }
+  EdgeViewer = @{
+    DirName = 'EdgeViewer'
+    Repo    = 'rg-software/wlx-edge-viewer'
+    DefaultVersion = 'v1.2.11'
+    Zips = @(
+      @{ File = 'wlx-edge-viewer-v1.2.11-Windows.zip'; Sha256 = '1AB56C88FC2DECD1304797C5DE81663B27FBE20514FABF10D40620B894BDAF80' }
+    )
+    Dll32 = 'EdgeViewer.wlx'; Dll64 = 'EdgeViewer.wlx64'
+    Detect = 'EXT="MD" | EXT="MARKDOWN"'
+    Match = '[\\/]EdgeViewer\.wlx(64)?$'; Exclusive = $false
+    Exports = @('ListLoad','ListLoadNext','ListGetDetectString')
   }
 }
 
@@ -120,7 +148,6 @@ $P = $Plugins[$Renderer]
 if (-not $Version) { $Version = $P.DefaultVersion }
 $PluginDirName = $P.DirName
 $Detect = $P.Detect
-$Superseded = $P.Superseded
 $BaseUrl = "https://github.com/$($P.Repo)/releases/download/$Version"
 
 function Write-Step([string]$Msg) { Write-Host "`n==> $Msg" -ForegroundColor Cyan }
@@ -290,6 +317,17 @@ if ($Renderer -eq 'MDView') {
   foreach ($f in 'mdview.wlx64','mdview.wlx') {
     Assert-True (Test-Path (Join-Path $Dest $f)) "installed: $f"
   }
+} elseif ($Renderer -eq 'EdgeViewer') {
+  $Stage = Join-Path $DlDir 'stage-edge'
+  Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
+  Expand-Archive -Path $ZipPaths[0] -DestinationPath $Stage -Force
+  # Everything but the TC auto-install file. The zip ships only
+  # edgeviewer.ini.sample, so a user's own edgeviewer.ini is never overwritten.
+  Get-ChildItem $Stage | Where-Object { $_.Name -ne 'pluginst.inf' } | Copy-Item -Destination $Dest -Recurse -Force
+  foreach ($f in 'EdgeViewer.wlx64','EdgeViewer.wlx','edgeviewer.ini.sample',
+                'assets\markdown','assets\highlight_js','assets\mathjax','assets\mermaid') {
+    Assert-True (Test-Path (Join-Path $Dest $f)) "installed: $f"
+  }
 } else {
   $Stage64 = Join-Path $DlDir 'stage-x64'; $Stage86 = Join-Path $DlDir 'stage-x86'
   Remove-Item -Recurse -Force $Stage64,$Stage86 -ErrorAction SilentlyContinue
@@ -333,25 +371,36 @@ if ($Renderer -eq 'MDView') {
 # ---------- 5. register in wincmd.ini ----------
 Write-Step 'Registering lister plugin in wincmd.ini'
 
+# Is entry 'N=<dll>' (followed by $NextLine) a registration of one of our
+# renderers, i.e. ours to drop and re-add? See Match/Exclusive in the catalog.
+function Test-OurEntry([string]$Index, [string]$Dll, [string]$NextLine) {
+  foreach ($r in $Plugins.Values) {
+    if ($Dll -notmatch $r.Match) { continue }
+    if ($r.Exclusive -or $NextLine -eq "$Index`_detect=`"$($r.Detect)`"") { return $true }
+  }
+  return $false
+}
+
 function Register-Section {
   param([string[]]$Lines, [string]$Section, [string]$DllFile)
-  # pass 1: drop our own stale lines (our dll path + its N_detect), the other
-  # renderer's lines, and TC-written junk ('N=1') inside the section.
-  # The detect line is dropped only when it directly follows one of those dll
-  # lines, so a foreign plugin's N_detect is never touched.
+  # pass 1: drop every registration of our renderers (this one and the others,
+  # so only one Markdown WLX stays) together with its N_detect line, plus
+  # TC-written junk ('N=1') inside the section. Only the N_detect line with the
+  # same N directly after the dll line goes with it, so a foreign plugin's
+  # N_detect is never touched.
   $out = New-Object System.Collections.Generic.List[string]
   $inSec = $false
-  $skipNextDetect = $false
-  foreach ($l in $Lines) {
-    if ($l -match '^\[.*\]$') { $inSec = ($l -eq $Section); $skipNextDetect = $false }
-    if ($inSec) {
-      $own = $l -match [regex]::Escape($DllFile)
-      $old = $false
-      foreach ($s in $Superseded) { if ($l -match $s) { $old = $true; break } }
-      if ($own -or $old) { $skipNextDetect = $true; continue }
-      if ($skipNextDetect -and $l -match '^\d+_detect=') { $skipNextDetect = $false; continue }
-      $skipNextDetect = $false
-      if ($l -match '^\d+=1$') { continue }
+  for ($i = 0; $i -lt $Lines.Count; $i++) {
+    $l = $Lines[$i]
+    if ($l -match '^\[.*\]$') { $inSec = ($l -eq $Section) }
+    if ($inSec -and $l -match '^(\d+)=(.*)$') {
+      $n = $Matches[1]; $val = $Matches[2]
+      $nextLine = if ($i + 1 -lt $Lines.Count) { $Lines[$i + 1] } else { '' }
+      if (Test-OurEntry $n $val $nextLine) {
+        if ($nextLine -match "^$n`_detect=") { $i++ }
+        continue
+      }
+      if ($val -eq '1') { continue }
     }
     $out.Add($l)
   }
@@ -424,14 +473,21 @@ foreach ($file in $Targets.Keys) {
 
   $final = [System.IO.File]::ReadAllLines($file, $enc)
   foreach ($t in $Targets[$file]) {
-    $sec = Get-SectionLines $final "[$($t.Name)]"
+    $sec = @(Get-SectionLines $final "[$($t.Name)]")
     $idx = @($sec | Where-Object { $_ -match '^\d+=' })
     Assert-True ($idx.Count -gt 0 -and $idx[0] -eq "0=$($t.Dll)" -and $sec -contains "0_detect=`"$Detect`"") "[$($t.Name)] entry 0 is $(Split-Path $t.Dll -Leaf) + detect"
     $nums = @($idx | ForEach-Object { [int]($_ -replace '=.*$', '') })
     Assert-True (-not (Compare-Object $nums @(0..($nums.Count-1)) -SyncWindow 0)) "[$($t.Name)] plugin indices are 0..$($nums.Count-1)"
-    foreach ($s in $Superseded) {
-      Assert-True (-not ($sec -match $s)) "[$($t.Name)] other renderer retired ($s)"
-    }
+    $ours = @(for ($i = 0; $i -lt $sec.Count; $i++) {
+      if ($sec[$i] -match '^(\d+)=(.*)$' -and $Matches[1] -ne '0') {
+        $n = $Matches[1]; $val = $Matches[2]
+        $nextLine = if ($i + 1 -lt $sec.Count) { $sec[$i + 1] } else { '' }
+        if (Test-OurEntry $n $val $nextLine) { $sec[$i] }
+      }
+    })
+    Assert-True ($ours.Count -eq 0) "[$($t.Name)] other Markdown renderers retired"
+    $kept = @($sec | Where-Object { $_ -match '^[1-9]\d*=' -and ($_ -replace '^\d+=', '') -match $P.Match })
+    if ($kept) { Write-Host "  [$($t.Name)] kept your own $Renderer registration for other file types: $($kept -join ', ')" }
     Assert-True (-not ($sec -match 'EXT="TXT"' | Where-Object { $_ -match '^0_detect=' })) "[$($t.Name)] detect filter does not claim .txt"
   }
 }
@@ -464,7 +520,7 @@ if (-not $LeaveRunning) {
   Start-Process $exe
 }
 Write-Step 'Done'
-if ($Renderer -eq 'MDView') {
+if ($Renderer -ne 'GitHubStyle') {
   Write-Host 'Use: F3 on any .md = formatted view | Ctrl+Q = live preview | 4 = cycle plugins | ESC = close.'
 } else {
   Write-Host 'Use: F3 on any .md = formatted view | Ctrl+Q = live preview | 4 = cycle plugins. NOTE: Esc is swallowed by this renderer: close Lister with X or Alt+F4.'
