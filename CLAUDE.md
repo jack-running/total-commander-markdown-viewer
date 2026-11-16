@@ -32,7 +32,14 @@ On Linux, `pwsh` can run steps 1–5 against a fake TC folder (an empty
 copies files and edits the ini, then fails at the `LoadLibrary` export check,
 which is expected. Set `TEMP` and pass `-LeaveRunning`. Use a fresh folder per
 run. Paths TC stores with `\` (e.g. `%COMMANDER_PATH%\x.ini`) only resolve on
-Windows; use `/` in Linux test data.
+Windows; use `/` in Linux test data. To exercise the close-TC path (step 2), run
+a dummy process named `TOTALCMD64` first (`cp /bin/sleep <dir>/TOTALCMD64` and
+start it) and drop `-LeaveRunning`; without that, step 2's loop never runs.
+
+PowerShell variable names ignore case, so a script-scope `$p` *is* the catalog
+entry `$P` (and `$dest` is `$Dest`). Never reuse a name that differs only in
+case: overwriting `$P` in the close-TC loop once made every install fail with
+"argument is null or empty" whenever TC was running.
 
 The script self-verifies at runtime via `Assert-True` (throws on failure); new
 behavior should add matching `Assert-True` checks rather than silent assumptions.

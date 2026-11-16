@@ -254,10 +254,12 @@ if ($Renderer -eq 'GitHubStyle') {
 $TcRunningExe = $null
 if (-not $LeaveRunning) {
   Write-Step 'Closing Total Commander'
-  foreach ($p in @(Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue)) {
-    if (-not $TcRunningExe) { try { $TcRunningExe = $p.Path } catch {} }
-    if ($p.CloseMainWindow()) { Write-Host "  asked $($p.ProcessName) (pid $($p.Id)) to close" }
-    else { Write-Warning "$($p.ProcessName) (pid $($p.Id)) has no main window (minimized to tray?), forcing it closed"; $p | Stop-Process -Force }
+  # Not $p: PowerShell variable names ignore case, so $p would overwrite the
+  # renderer catalog entry $P.
+  foreach ($proc in @(Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue)) {
+    if (-not $TcRunningExe) { try { $TcRunningExe = $proc.Path } catch {} }
+    if ($proc.CloseMainWindow()) { Write-Host "  asked $($proc.ProcessName) (pid $($proc.Id)) to close" }
+    else { Write-Warning "$($proc.ProcessName) (pid $($proc.Id)) has no main window (minimized to tray?), forcing it closed"; $proc | Stop-Process -Force }
   }
   $deadline = (Get-Date).AddSeconds(20)
   while ((Get-Process TOTALCMD64,TOTALCMD -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
@@ -286,21 +288,21 @@ $ZipPaths = @()
 foreach ($z in $P.Zips) {
   # Zip file names embed the default version; rebuild them when -Version overrides it.
   $file = $z.File -replace [regex]::Escape($P.DefaultVersion.TrimStart('v')), $Version.TrimStart('v')
-  $dest = Join-Path $DlDir $file
-  if (-not (Test-Path $dest)) { Save-Download "$BaseUrl/$file" $dest }
-  $hash = (Get-FileHash $dest -Algorithm SHA256).Hash
+  $zipPath = Join-Path $DlDir $file
+  if (-not (Test-Path $zipPath)) { Save-Download "$BaseUrl/$file" $zipPath }
+  $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash
   if ($Version -eq $P.DefaultVersion) {
     if ($hash -ne $z.Sha256) {
       Write-Warning "cached $file has the wrong SHA-256 (corrupt or replaced), downloading it again"
-      Remove-Item -LiteralPath $dest -Force
-      Save-Download "$BaseUrl/$file" $dest
-      $hash = (Get-FileHash $dest -Algorithm SHA256).Hash
+      Remove-Item -LiteralPath $zipPath -Force
+      Save-Download "$BaseUrl/$file" $zipPath
+      $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash
     }
     Assert-True ($hash -eq $z.Sha256) "$file SHA-256 matches"
   } else {
     Write-Warning "custom -Version, recorded hash does not apply; downloaded $file SHA-256 = $hash"
   }
-  $ZipPaths += $dest
+  $ZipPaths += $zipPath
 }
 
 # ---------- 4. extract + copy files ----------
